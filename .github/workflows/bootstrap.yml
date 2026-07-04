@@ -58,9 +58,8 @@ jobs:
 
       - name: Install Strimzi operator
         run: |
-          helm repo add strimzi https://strimzi.io/charts/
-          helm repo update
-          helm upgrade --install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
+          helm upgrade --install strimzi-kafka-operator \
+            oci://quay.io/strimzi-helm/strimzi-kafka-operator \
             --namespace kafka \
             --create-namespace \
             --set watchNamespaces="{kafka}" \
