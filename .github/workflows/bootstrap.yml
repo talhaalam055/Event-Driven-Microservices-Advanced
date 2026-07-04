@@ -1,0 +1,129 @@
+name: Bootstrap Cluster
+
+# Run ONCE after a new cluster is provisioned by Terraform.
+# Installs operators (ArgoCD, Strimzi, ESO), deploys Kafka infrastructure,
+# and registers the ArgoCD Application. Subsequent app deploys use deploy.yml only.
+
+on:
+  workflow_dispatch:
+
+env:
+  REGION: us-central1
+
+jobs:
+  bootstrap:
+    name: Install operators and apply infrastructure manifests
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - name: Fetch CI config from Secret Manager
+        id: secrets
+        uses: google-github-actions/get-secretmanager-secrets@v2
+        with:
+          secrets: |-
+            cluster_name:${{ vars.GCP_PROJECT_ID }}/ci-gke-cluster-name
+            registry_url:${{ vars.GCP_PROJECT_ID }}/ci-registry-url
+            cloudsql_connection_name:${{ vars.GCP_PROJECT_ID }}/ci-cloudsql-connection-name
+            cloudsql_proxy_sa:${{ vars.GCP_PROJECT_ID }}/ci-cloudsql-proxy-sa
+            github_token:${{ vars.GCP_PROJECT_ID }}/ci-github-token
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ steps.secrets.outputs.cluster_name }}
+          location: ${{ env.REGION }}
+
+      # ── Helm operators ──────────────────────────────────────────────────────
+      - name: Install ArgoCD
+        run: |
+          helm repo add argo https://argoproj.github.io/argo-helm
+          helm repo update
+          helm upgrade --install argocd argo/argo-cd \
+            --namespace argocd \
+            --create-namespace \
+            --set server.service.type=ClusterIP \
+            --wait --timeout 5m
+
+      - name: Install Strimzi operator
+        run: |
+          helm repo add strimzi https://strimzi.io/charts/
+          helm repo update
+          helm upgrade --install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
+            --namespace kafka \
+            --create-namespace \
+            --set watchNamespaces="{kafka}" \
+            --wait --timeout 5m
+
+      - name: Install External Secrets Operator
+        run: |
+          helm repo add external-secrets https://charts.external-secrets.io
+          helm repo update
+          helm upgrade --install external-secrets external-secrets/external-secrets \
+            --namespace external-secrets \
+            --create-namespace \
+            --wait --timeout 5m
+
+      # ── Infrastructure manifests ─────────────────────────────────────────────
+      - name: Apply namespaces
+        run: kubectl apply -f infra/k8s/namespaces/namespaces.yml
+
+      - name: Deploy Kafka cluster and topics
+        run: |
+          kubectl apply -f infra/k8s/kafka/strimzi-kafka.yml
+          kubectl wait kafka/my-cluster --for=condition=Ready --timeout=10m -n kafka
+          kubectl apply -f infra/k8s/kafka/kafka-topics.yml
+
+      - name: Deploy Schema Registry
+        run: |
+          kubectl apply -f infra/k8s/schema-registry/deployment.yml
+          kubectl apply -f infra/k8s/schema-registry/service.yml
+          kubectl rollout status deployment/schema-registry -n kafka --timeout=3m
+
+      - name: Apply ConfigMaps and NetworkPolicies
+        run: |
+          kubectl apply -f infra/k8s/configmaps/kafka-config.yml
+          kubectl apply -f infra/k8s/network-policies/app-policies.yml
+
+      - name: Apply Secret Store and ExternalSecrets
+        run: |
+          sed -e "s/YOUR_PROJECT_ID/${{ vars.GCP_PROJECT_ID }}/g" \
+              -e "s/YOUR_REGION/${{ env.REGION }}/g" \
+              -e "s/YOUR_CLUSTER_NAME/${{ steps.secrets.outputs.cluster_name }}/g" \
+              infra/k8s/secrets/secret-store.yml | kubectl apply -f -
+          kubectl apply -f infra/k8s/secrets/external-secret.yml
+
+      - name: Apply Ingress
+        run: kubectl apply -f infra/k8s/ingress/ingress.yml
+
+      # ── ArgoCD setup ─────────────────────────────────────────────────────────
+      - name: Configure ArgoCD repo credentials
+        run: |
+          kubectl create secret generic argocd-repo-creds \
+            --namespace argocd \
+            --from-literal=type=git \
+            --from-literal=url=https://github.com/${{ github.repository }} \
+            --from-literal=password=${{ steps.secrets.outputs.github_token }} \
+            --from-literal=username=x-access-token \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label secret argocd-repo-creds \
+            -n argocd argocd.argoproj.io/secret-type=repository --overwrite
+
+      - name: Apply ArgoCD Application
+        run: |
+          sed -e "s|REPO_URL_PLACEHOLDER|https://github.com/${{ github.repository }}|g" \
+              -e "s|REGISTRY_URL_PLACEHOLDER|${{ steps.secrets.outputs.registry_url }}|g" \
+              -e "s|CLOUDSQL_CONNECTION_NAME_PLACEHOLDER|${{ steps.secrets.outputs.cloudsql_connection_name }}|g" \
+              -e "s|CLOUDSQL_PROXY_SA_PLACEHOLDER|${{ steps.secrets.outputs.cloudsql_proxy_sa }}|g" \
+              infra/k8s/argocd/application.yml | kubectl apply -f -

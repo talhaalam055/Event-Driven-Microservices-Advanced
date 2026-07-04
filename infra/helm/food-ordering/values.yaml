@@ -1,0 +1,39 @@
+# Required — set via --set or -f in CI
+imageRegistry: ""        # e.g. us-central1-docker.pkg.dev/my-project/food-ordering
+imageTag: "latest"
+cloudSqlConnectionName: "" # e.g. my-project:us-central1:food-ordering-postgres
+cloudSqlProxySA: ""        # e.g. cloudsql-proxy-sa@my-project.iam.gserviceaccount.com
+
+namespace: app
+kafkaNamespace: kafka
+
+services:
+  order-service:
+    port: 8181
+    dbSchema: order
+    replicas: 1
+  payment-service:
+    port: 8182
+    dbSchema: payment
+    replicas: 1
+  restaurant-service:
+    port: 8183
+    dbSchema: restaurant
+    replicas: 1
+  customer-service:
+    port: 8184
+    dbSchema: customer
+    replicas: 1
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 500m
+    memory: 1024Mi
+
+hpa:
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70

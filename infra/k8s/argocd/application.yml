@@ -1,0 +1,42 @@
+# Placeholders are replaced by deploy.yml using sed before kubectl apply.
+# Do not apply this file directly — use the deploy workflow.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: food-ordering
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.io   # deletes managed resources when Application is deleted
+spec:
+  project: default
+
+  source:
+    repoURL: REPO_URL_PLACEHOLDER
+    targetRevision: main
+    path: infra/helm/food-ordering
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml    # updated by CI on every deploy (imageTag only)
+      parameters:
+        # These rarely change — set once by deploy.yml from Secret Manager values.
+        # Storing them here (not in values-prod.yaml) keeps sensitive-ish infra
+        # references out of the committed file.
+        - name: imageRegistry
+          value: "REGISTRY_URL_PLACEHOLDER"
+        - name: cloudSqlConnectionName
+          value: "CLOUDSQL_CONNECTION_NAME_PLACEHOLDER"
+        - name: cloudSqlProxySA
+          value: "CLOUDSQL_PROXY_SA_PLACEHOLDER"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: app
+
+  syncPolicy:
+    automated:
+      prune: true        # remove resources deleted from Git
+      selfHeal: true     # revert manual kubectl changes back to Git state
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

@@ -1,0 +1,136 @@
+# NetworkPolicies for the app namespace.
+#
+# Design: default-deny everything, then re-allow only what each service needs:
+#   - DNS (kube-system:53)
+#   - Kafka bootstrap (kafka:9092) and Schema Registry (kafka:8081)
+#   - GCP APIs over HTTPS (Cloud SQL Auth Proxy, Workload Identity token exchange)
+#   - Ingress from kubelet health probes (node subnet 10.0.0.0/18)
+#   - Ingress from GCP Cloud Load Balancer to the two public-facing services
+#
+# GCP LB health check source ranges are fixed by Google:
+#   130.211.0.0/22 and 35.191.0.0/16
+# Node subnet is defined in infra/terraform/modules/network/variables.tf (10.0.0.0/18).
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-egress
+  namespace: app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kafka
+      ports:
+        - port: 9092
+          protocol: TCP
+        - port: 8081
+          protocol: TCP
+
+---
+# Cloud SQL Auth Proxy and Workload Identity token exchange both use HTTPS
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gcp-api-egress
+  namespace: app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 443
+          protocol: TCP
+
+---
+# Kubelet health probes originate from node IPs within the node subnet
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-health-probe-ingress
+  namespace: app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/18
+      ports:
+        - port: 8181
+          protocol: TCP
+        - port: 8182
+          protocol: TCP
+        - port: 8183
+          protocol: TCP
+        - port: 8184
+          protocol: TCP
+
+---
+# GCP Cloud Load Balancer forwards traffic and health-checks order-service and customer-service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-lb-ingress
+  namespace: app
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - order-service
+          - customer-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 130.211.0.0/22
+        - ipBlock:
+            cidr: 35.191.0.0/16
+      ports:
+        - port: 8181
+          protocol: TCP
+        - port: 8184
+          protocol: TCP

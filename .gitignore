@@ -160,4 +160,19 @@
 **/infrastructure/docker-compose/volumes/zookeeper/data/**
 **/infrastructure/docker-compose/volumes/zookeeper/transactions/**
 
+######################
+# Claude Code
+######################
+.claude/
+
+######################
+# Terraform
+######################
+infra/terraform/**/.terraform/
+infra/terraform/**/*.tfstate
+infra/terraform/**/*.tfstate.backup
+infra/terraform/**/tfplan
+# terraform.tfvars holds real project IDs — copy terraform.tfvars.example instead
+infra/terraform/prod/terraform.tfvars
+
 

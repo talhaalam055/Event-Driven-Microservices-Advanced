@@ -1,0 +1,92 @@
+{{- range $name, $config := .Values.services }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: {{ $name }}
+    {{- include "food-ordering.labels" $ | nindent 4 }}
+spec:
+  replicas: {{ $config.replicas }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+    spec:
+      serviceAccountName: {{ $name }}-sa
+      initContainers:
+        - name: wait-for-kafka
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - >
+              until nc -z my-cluster-kafka-bootstrap.{{ $.Values.kafkaNamespace }}.svc.cluster.local 9092;
+              do echo 'waiting for kafka...'; sleep 3; done
+        - name: wait-for-schema-registry
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - >
+              until wget -qO- http://schema-registry.{{ $.Values.kafkaNamespace }}.svc.cluster.local:8081/subjects > /dev/null 2>&1;
+              do echo 'waiting for schema-registry...'; sleep 3; done
+      containers:
+        - name: {{ $name }}
+          image: {{ $.Values.imageRegistry }}/{{ $name }}:{{ $.Values.imageTag }}
+          ports:
+            - containerPort: {{ $config.port }}
+          envFrom:
+            - configMapRef:
+                name: kafka-config
+          env:
+            - name: SPRING_DATASOURCE_URL
+              value: "jdbc:postgresql://localhost:5432/postgres?currentSchema={{ $config.dbSchema }}&binaryTransfer=true&reWriteBatchedInserts=true&stringtype=unspecified"
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsql-credentials
+                  key: username
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsql-credentials
+                  key: password
+          resources:
+            {{- toYaml $.Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: {{ $config.port }}
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: {{ $config.port }}
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 3
+
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.8.0
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "{{ $.Values.cloudSqlConnectionName }}"
+          securityContext:
+            runAsNonRoot: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+{{- end }}

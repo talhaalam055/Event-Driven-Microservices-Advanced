@@ -1,127 +1,156 @@
-# EVENT DRIVEN MICROSERVICES  ADVANCED
+# Event-Driven Microservices — Advanced
 
-## CLEAN ARCHITECTURE FOR ORDER-SERVICE
+A production-grade food ordering system built with four Spring Boot microservices communicating asynchronously via Apache Kafka. Implements hexagonal architecture, DDD, Saga, Outbox, CQRS, and CDC patterns. Deployed on GKE using Terraform, ArgoCD, and GitHub Actions.
+
+---
+
+## Architecture
+
+### Clean Architecture (Order Service)
 
 ![orderService](./doc/orderService.jpg)
 
-## DOMAIN DRIVEN DESIGN (DDD) FOR ORDER-SERVICE
+### Domain-Driven Design (Order Service)
 
 ![orderServiceDDD](./doc/orderServiceDDD.png)
 
-## ORDER STATE TRANSITIONS
+---
+
+## Saga Pattern — Order State Transitions
 
 ![Order state transitions](./doc/orderStateTransitions.png)
 
-## OUTBOX PATTERN
+The order-service orchestrates a distributed transaction across payment-service and restaurant-service using compensating transactions:
+
+```
+POST /orders → order-service
+  → payment-request              → payment-service
+  → payment-response             → order-service         (PAID)
+  → restaurant-approval-request  → restaurant-service
+  → restaurant-approval-response → order-service         (APPROVED)
+```
+
+Payment failure rolls back to `CANCELLED`. Restaurant rejection after payment triggers a refund event and rolls back to `CANCELLED`.
+
+---
+
+## Outbox Pattern
 
 ![outbox pattern](./doc/outbox.png)
 
-### OUTBOX HAPPY FLOW
+Solves the dual-write problem: domain events are written to a local `*_outbox` table **in the same DB transaction** as the business write, guaranteeing at-least-once delivery to Kafka without a distributed transaction.
 
+### Happy flow
 ![outbox happy flow](./doc/outbox-happy-flow.png)
 
-### OUTBOX PAYMENT FAILURE
-
+### Payment failure
 ![outbox payment failure](./doc/outbox-payment-failure.png)
 
-### OUTBOX APPROVAL FAILURE
-
+### Restaurant rejection
 ![outbox approval failure](./doc/outbox-approval-failure.png)
+
+---
 
 ## CQRS
 
 ![CQRS](./doc/CQRS.jpg)
 
-Yes, there is not strong consistency between local database operations and data publishing operation for the customer service, outbox pattern implementation can fix that.
+The order-service maintains separate read and write models. The customer-service CQRS projection does not use the outbox pattern — eventual consistency there is not guaranteed under failure.
 
-## CHANGE DATA CAPTURE (CDC)
+---
 
-- Use Push method as opposed to Pulling
+## Change Data Capture (CDC)
 
-- Push database records into target source (Kafka) by reading from Transaction Logs (WAL in Postgres)
+![CDC](./doc/cdc.png)
 
-  ![CDC](./doc/cdc.png)
+Debezium reads PostgreSQL's WAL (Write-Ahead Log) and streams outbox rows directly to Kafka, replacing the polling scheduler.
 
-  Will be replacing the scheduler written in Java:
+![CDC VS SCHEDULER](./doc/cdc-vs-scheduler.png)
 
-  ![CDC VS SCHEDULER](./doc/cdc-vs-scheduler.png)
+---
 
-## API USAGE
+## Tech Stack
 
-1. POST request to http://localhost:8184/customers with JSON body:
+| Layer | Technology |
+|-------|-----------|
+| Services | Spring Boot 2.7, Java 17 |
+| Messaging | Apache Kafka (Strimzi on GKE), Avro, Confluent Schema Registry |
+| Database | Cloud SQL PostgreSQL 15 (private IP, Cloud SQL Auth Proxy sidecar) |
+| Infrastructure | Terraform, GKE Standard, Google Artifact Registry |
+| GitOps | ArgoCD + Helm |
+| CI/CD | GitHub Actions + Workload Identity Federation (no stored credentials) |
+| Secrets | GCP Secret Manager + External Secrets Operator |
+| IaC security | tfsec |
 
-```json
-{
-    "customerId":"d215b5f8-0249-4dc5-89a3-51fd148cfb41",
+---
+
+## Deployment
+
+The full step-by-step guide is in **[GCP-IMPLEMENTATION.md](./GCP-IMPLEMENTATION.md)**.
+
+### CI/CD Overview
+
+```
+push to infra/terraform/**
+  └── terraform.yml
+        ├── tfsec security scan        (blocks on HIGH/CRITICAL findings)
+        ├── terraform plan             (uploads plan artifact)
+        └── terraform apply  ◄──────── requires human approval (GitHub Environment)
+
+push to app code
+  └── build.yml
+        ├── mvn clean package -DskipTests
+        └── push 4 images to Artifact Registry (tagged with git SHA + latest)
+              └── deploy.yml  (triggered automatically after build succeeds)
+                    ├── update infra/helm/food-ordering/values-prod.yaml
+                    ├── commit + push  ◄── ArgoCD detects the change
+                    └── poll ArgoCD until Healthy + Synced
+```
+
+Run **bootstrap.yml** once after cluster creation to install operators (ArgoCD, Strimzi, ESO) and apply Kafka infrastructure.
+
+---
+
+## API
+
+After deployment, get the external IP:
+
+```bash
+kubectl get ingress food-ordering-ingress -n app
+```
+
+**Create a customer** (required before placing orders):
+```bash
+curl -X POST http://EXTERNAL_IP/customers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerId": "d215b5f8-0249-4dc5-89a3-51fd148cfb41",
     "username": "user_1",
     "firstName": "Armando",
     "lastName": "Maradona"
-}
+  }'
 ```
 
-2. POST request to http://localhost:8181/orders  request to with JSON body:
-
-```json
-{
-  "customerId": "d215b5f8-0249-4dc5-89a3-51fd148cfb41",
-  "restaurantId": "d215b5f8-0249-4dc5-89a3-51fd148cfb45",
-  "address": {
-    "street": "street_1",
-    "postalCode": "1000AB",
-    "city": "Amsterdam"
-  },
-  "price": 200.00,
-  "items": [
-    {
-      "productId": "d215b5f8-0249-4dc5-89a3-51fd148cfb48",
-      "quantity": 1,
-      "price": 50.00,
-      "subTotal": 50.00
-    },
-    {
-      "productId": "d215b5f8-0249-4dc5-89a3-51fd148cfb48",
-      "quantity": 3,
-      "price": 50.00,
-      "subTotal": 150.00
-    }
-  ]
-}
+**Place an order:**
+```bash
+curl -X POST http://EXTERNAL_IP/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerId": "d215b5f8-0249-4dc5-89a3-51fd148cfb41",
+    "restaurantId": "d215b5f8-0249-4dc5-89a3-51fd148cfb45",
+    "address": { "street": "street_1", "postalCode": "1000AB", "city": "Amsterdam" },
+    "price": 200.00,
+    "items": [
+      { "productId": "d215b5f8-0249-4dc5-89a3-51fd148cfb48", "quantity": 1, "price": 50.00, "subTotal": 50.00 },
+      { "productId": "d215b5f8-0249-4dc5-89a3-51fd148cfb48", "quantity": 3, "price": 50.00, "subTotal": 150.00 }
+    ]
+  }'
 ```
 
-3. Get the orderTrackingId from the response and query the result with a GET operation to http://localhost:8181/orders/toChangewithOrderTrackingId
+**Track order status** (use `trackingId` from the order response):
+```bash
+curl http://EXTERNAL_IP/orders/{orderTrackingId}
+# PENDING → PAID (within seconds) → APPROVED (within ~10s outbox cycle)
+```
 
-You will see that first is PAID (payment-service replied), and roughly after 10 seconds, it is APPROVED (restaurant-service confirmed) if you continue to perform GET operation. Notice that if you perform the previous POST operation multiple times, it will fail, because there are not enough funds, and this can be an example of bad path.
-
-## HOW TO LAUNCH THE SERVICES
-
-0. Run Docker and Kubernetes
-
-1. [Install helm](https://helm.sh/docs/intro/install/).
-
-2. Type in terminal:
-
-    ``` bash
-    helm repo add my-repo https://charts.bitnami.com/bitnami
-    helm install my-release my-repo/kafka
-    helm install schema my-repo/schema-registry
-    ```
-
-3. From the project's root type in terminal: ```mvn clean install```
-
-4. Go from terminal in the folder Event-Driven-Microservices-Advanced/infrastructure/k8s and type: ```kubectl apply -f kafka-client.yml```
-
-5. Once the pod is running type in terminal: ```kubectl exec -it kafka-client -- /bin/bash ```
-
-6. Once in the container, let's create the topics needed for running the applications: 
-
-   ```bash
-   kafka-topics --bootstrap-server my-release-kafka:9092 --create --if-not-exists --topic payment-request --replication-factor 1 --partitions 3
-   kafka-topics --bootstrap-server my-release-kafka:9092 --create --if-not-exists --topic payment-response --replication-factor 1 --partitions 3
-   kafka-topics --bootstrap-server my-release-kafka:9092 --create --if-not-exists --topic restaurant-approval-request --replication-factor 1 --partitions 3
-   kafka-topics --bootstrap-server my-release-kafka:9092 --create --if-not-exists --topic restaurant-approval-response --replication-factor 1 --partitions 3
-   kafka-topics --bootstrap-server my-release-kafka:9092 --create --if-not-exists --topic customer --replication-factor 1 --partitions 3
-   ```
-
-7. While still inside the container let's verify that all 5 topics have been created with: ```kafka-topics --zookeeper my-release-zookeeper:2181 --list```
-8. Exit from the container and from the folder Event-Driven-Microservices-Advanced/infrastructure/k8s , type: ```kubectl apply -f postgres-deployment.yml ```
-9. Wait that postgres is running and after type: ```kubectl apply -f application-deployment-local.yml```
+Repeating the same order POST will fail due to insufficient funds — this exercises the payment failure rollback path.

@@ -1,0 +1,104 @@
+name: Deploy to GKE
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Images"]
+    types: [completed]
+    branches: [main]
+  # Manual re-deploy — accepts a specific image tag without triggering a new build
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (SHA or 'latest')"
+        required: false
+        default: "latest"
+
+env:
+  REGION: us-central1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: write   # needed to commit values-prod.yaml back to the repo
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Auth ────────────────────────────────────────────────────────────────
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - name: Fetch CI config from Secret Manager
+        id: secrets
+        uses: google-github-actions/get-secretmanager-secrets@v2
+        with:
+          secrets: |-
+            cluster_name:${{ vars.GCP_PROJECT_ID }}/ci-gke-cluster-name
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "value=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ steps.secrets.outputs.cluster_name }}
+          location: ${{ env.REGION }}
+
+      # ── GitOps trigger — commit new imageTag, ArgoCD auto-syncs ─────────────
+      - name: Update values-prod.yaml with new image tag
+        run: |
+          cat > infra/helm/food-ordering/values-prod.yaml << EOF
+          # Auto-updated by CI/CD — do not edit manually.
+          # imageRegistry, cloudSqlConnectionName, cloudSqlProxySA are set as
+          # ArgoCD helm parameters (see infra/k8s/argocd/application.yml).
+          # Last deployed: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          imageTag: "${{ steps.tag.outputs.value }}"
+          EOF
+
+      - name: Commit and push values-prod.yaml
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add infra/helm/food-ordering/values-prod.yaml
+          # --quiet exits 0 if nothing to commit (idempotent re-runs)
+          git diff --staged --quiet || \
+            git commit -m "chore: deploy ${{ steps.tag.outputs.value }} [skip ci]"
+          git push origin main
+
+      # ── Wait for ArgoCD to sync and report healthy ───────────────────────────
+      - name: Wait for ArgoCD sync
+        run: |
+          echo "Waiting for ArgoCD to sync food-ordering..."
+          for i in $(seq 1 30); do
+            HEALTH=$(kubectl get application food-ordering -n argocd \
+              -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+            SYNC=$(kubectl get application food-ordering -n argocd \
+              -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+            echo "[$i/30] Health: $HEALTH  Sync: $SYNC"
+            if [ "$HEALTH" = "Healthy" ] && [ "$SYNC" = "Synced" ]; then
+              echo "Application is healthy and synced"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Timed out — dumping ArgoCD Application status:"
+          kubectl describe application food-ordering -n argocd
+          exit 1
+
+      - name: Print Ingress external IP
+        run: kubectl get ingress food-ordering-ingress -n app

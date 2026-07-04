@@ -1,0 +1,4 @@
+# Auto-updated by the deploy workflow on every release — do not edit manually.
+# imageRegistry, cloudSqlConnectionName, cloudSqlProxySA are set as ArgoCD
+# helm parameters (see infra/k8s/argocd/application.yml) so they stay out of Git.
+imageTag: "latest"

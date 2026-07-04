@@ -1,0 +1,6 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit real project IDs to the repo.
+project_id   = "YOUR_GCP_PROJECT_ID"
+region       = "us-central1"
+cluster_name = "food-ordering-cluster"
+github_repo  = "YOUR_GITHUB_USERNAME/Event-Driven-Microservices-Advanced"

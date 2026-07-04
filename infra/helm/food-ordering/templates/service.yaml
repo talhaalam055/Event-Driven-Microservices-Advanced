@@ -1,0 +1,19 @@
+{{- range $name, $config := .Values.services }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: {{ $name }}
+    {{- include "food-ordering.labels" $ | nindent 4 }}
+spec:
+  selector:
+    app: {{ $name }}
+  ports:
+    - port: {{ $config.port }}
+      targetPort: {{ $config.port }}
+      protocol: TCP
+  type: ClusterIP
+---
+{{- end }}
